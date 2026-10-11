@@ -922,8 +922,22 @@ class XPartGenerateParts(io.ComfyNode):
             print(f"[X-Part Generate] Using pre-computed Sonata features ({len(sonata_features)} points)")
 
             # Save mesh to temp file for pipeline
+            # dsh fork patch (upstream defect 1; evidence in the
+            # dsh-comfyui-based-tools docs): trimesh serializes
+            # mesh.metadata into the glTF extras, and the metadata carries
+            # the Sonata features (~200k x 512). The temp file balloons
+            # ~20MB -> ~1.4GB, reading it back costs ~142s, and the
+            # per-part deepcopy in trimesh.util.submesh grinds for >10 min
+            # and eats >10GB RAM (crashing into comfy-env's 600s call
+            # timeout). Only geometry is needed here: the features were
+            # already captured into precomputed_sonata above.
             mesh_path = get_temp_mesh_path(prefix="xpart_input_", suffix=".glb")
-            save_mesh(mesh_obj, mesh_path)
+            _metadata_backup = mesh_obj.metadata
+            try:
+                mesh_obj.metadata = {}
+                save_mesh(mesh_obj, mesh_path)
+            finally:
+                mesh_obj.metadata = _metadata_backup
 
             # Read bounding boxes from explicit BBOXES_3D input (from P3SAMSegmentMesh)
             aabb = bounding_boxes['bboxes']
