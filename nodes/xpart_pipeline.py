@@ -25,6 +25,22 @@ from diffusers.utils.torch_utils import randn_tensor
 from pathlib import Path
 
 
+def _part_file(ckpt_path, flat_name, subdir_rel):
+    """Resolve a part-weights file path.
+
+    Prefers the flat layout (<ckpt_path>/<flat_name>) that smart_load_model
+    guarantees after it flattens the HuggingFace download, and falls back to
+    the repo-style subdirectory layout (<ckpt_path>/<subdir_rel>) for manually
+    placed full-repo snapshots. The two layouts previously disagreed between
+    smart_load_model (flat) and from_pretrained (subdirectory), which crashed
+    any deployment that only had the flat layout.
+    """
+    flat = os.path.join(ckpt_path, flat_name)
+    if os.path.isfile(flat):
+        return flat
+    return os.path.join(ckpt_path, subdir_rel)
+
+
 @synchronize_timer("Export to trimesh")
 def export_to_trimesh(mesh_output):
     import comfy.model_management
@@ -290,7 +306,7 @@ class PartFormerPipeline(TokenAllocMixin):
             print(f"[X-Part] Loading model...")
             t0 = time.time()
             model = instantiate_from_config(config["model"])
-            model_path = os.path.join(ckpt_path, "model", "model.safetensors")
+            model_path = _part_file(ckpt_path, "model.safetensors", os.path.join("model", "model.safetensors"))
             print(f"[X-Part]   Reading {model_path}")
             model_state = load_file(model_path, device="cuda")
             model.load_state_dict(model_state, strict=False)
@@ -300,7 +316,7 @@ class PartFormerPipeline(TokenAllocMixin):
             print(f"[X-Part] Loading VAE...")
             t0 = time.time()
             vae = instantiate_from_config(config["shapevae"])
-            vae_path = os.path.join(ckpt_path, "shapevae", "shapevae.safetensors")
+            vae_path = _part_file(ckpt_path, "shapevae.safetensors", os.path.join("shapevae", "shapevae.safetensors"))
             print(f"[X-Part]   Reading {vae_path}")
             vae_state = load_file(vae_path, device="cuda")
             vae.load_state_dict(vae_state, strict=False)
@@ -312,7 +328,7 @@ class PartFormerPipeline(TokenAllocMixin):
                 t0 = time.time()
                 conditioner = instantiate_from_config(config["conditioner"])
                 print(f"[X-Part] DEBUG: After instantiate_from_config, obj_encoder.encoder.pc_size = {conditioner.obj_encoder.encoder.pc_size}")
-                conditioner_path = os.path.join(ckpt_path, "conditioner", "conditioner.safetensors")
+                conditioner_path = _part_file(ckpt_path, "conditioner.safetensors", os.path.join("conditioner", "conditioner.safetensors"))
                 print(f"[X-Part]   Reading {conditioner_path}")
                 conditioner_state = load_file(conditioner_path, device="cuda")
                 conditioner.load_state_dict(conditioner_state, strict=False)
@@ -322,7 +338,7 @@ class PartFormerPipeline(TokenAllocMixin):
                 conditioner = vae
 
             # Path to p3sam checkpoint (safetensors format)
-            p3sam_ckpt_path = os.path.join(ckpt_path, "p3sam", "p3sam.safetensors")
+            p3sam_ckpt_path = _part_file(ckpt_path, "p3sam.safetensors", os.path.join("p3sam", "p3sam.safetensors"))
 
         scheduler = instantiate_from_config(config["scheduler"])
         config["bbox_predictor"]["params"]["ckpt_path"] = p3sam_ckpt_path
