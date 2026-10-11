@@ -11,6 +11,41 @@ from .vae import VolumeDecoderShapeVAE
 from ..sonata.extractor import SonataFeatureExtractor
 
 
+def _nearest_index_chunked(query, reference, budget=256 * 2**20):
+    """Exact argmin of ``cdist(query, reference, p=2)`` over the reference point
+    dimension, computed in chunks so the ``(..., Q, R)`` distance matrix is never
+    materialised in full (peak VRAM ~= ``budget`` instead of O(Q*R)).
+
+    Equivalent to an unchunked distance matrix + ``argmin(dim=-1)`` for both 2-D
+    and batched 3-D inputs, tie-breaking included: the strict ``<`` keeps the
+    earliest index, exactly like ``argmin`` does.
+    """
+    squeeze = query.dim() == 2
+    if squeeze:
+        query = query.unsqueeze(0)
+    if reference.dim() == 2:
+        reference = reference.unsqueeze(0)
+
+    total = reference.shape[-2]
+    batch = max(query.shape[0], reference.shape[0])
+    per_point = max(1, batch * query.shape[-2] * reference.element_size())
+    step = max(1, min(total, int(budget // per_point)))
+
+    best_val = best_idx = None
+    for start in range(0, total, step):
+        dist = torch.cdist(query, reference[..., start:start + step, :], p=2)
+        val, idx = torch.min(dist, dim=-1)
+        idx = idx + start
+        if best_val is None:
+            best_val, best_idx = val, idx
+        else:
+            better = val < best_val
+            best_val = torch.where(better, val, best_val)
+            best_idx = torch.where(better, idx, best_idx)
+        del dist, val, idx
+    return best_idx.squeeze(0) if squeeze else best_idx
+
+
 # --------------------------------------------------------------------------- #
 #  PartEncoder
 # --------------------------------------------------------------------------- #
@@ -160,8 +195,9 @@ class Conditioner(nn.Module):
                 obj_points = object_surface[:1, ..., :3].to(dtype=precomputed_points.dtype)
 
                 with torch.no_grad():
-                    dists = torch.cdist(obj_points[0], precomputed_points.unsqueeze(0)[0])
-                    nearest_indices = torch.argmin(dists, dim=-1)
+                    nearest_indices = _nearest_index_chunked(
+                        obj_points[0], precomputed_points
+                    )
                     point_feat = precomputed_feats[nearest_indices].unsqueeze(0)
 
                 print(f"[Conditioner] Using precomputed Sonata features ({precomputed_feats.shape[0]} -> {point_feat.shape[1]} points)")
@@ -175,8 +211,8 @@ class Conditioner(nn.Module):
 
             # local feat
             if self.use_obj:
-                nearest_global_matches = torch.argmin(
-                    torch.cdist(global_pc_infos[0], object_surface[..., :3]), dim=-1
+                nearest_global_matches = _nearest_index_chunked(
+                    global_pc_infos[0], object_surface[..., :3]
                 )
                 global_point_feats = point_feat.expand(num_parts, -1, -1).gather(
                     1,
@@ -189,8 +225,8 @@ class Conditioner(nn.Module):
                     context["obj_cond"] = self.obj_out_proj(context["obj_cond"])
 
             if self.use_geo:
-                nearest_local_matches = torch.argmin(
-                    torch.cdist(local_pc_infos[0], object_surface[..., :3]), dim=-1
+                nearest_local_matches = _nearest_index_chunked(
+                    local_pc_infos[0], object_surface[..., :3]
                 )
                 local_point_feats = point_feat.expand(num_parts, -1, -1).gather(
                     1,
